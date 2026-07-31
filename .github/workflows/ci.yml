@@ -16,7 +16,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgmp-dev libpari-dev pari-gp
       - name: Install oracle dependencies
-        run: python3 -m pip install --user cypari2
+        run: python3 -m pip install --user cypari2 python-flint
       - uses: leanprover/lean-action@v1
         with:
           auto-config: false
