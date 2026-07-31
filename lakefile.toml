@@ -9,12 +9,12 @@ leanOptions = [
 [[require]]
 name = "HexPolyFp"
 git = "https://github.com/leanprover/hex-poly-fp.git"
-rev = "0e0fd9b6e0afdcda5d78dcbceb262b900634f65e"
+rev = "4a3d3a4eb92596a8e42fedd20db008d8167362fa"
 
 [[require]]
 name = "HexPolyZ"
 git = "https://github.com/leanprover/hex-poly-z.git"
-rev = "a3d2bc38d47673cc724feb01ba277e787b313719"
+rev = "e7b22902bf8001f15fbc0378bfae3a16197a8f5a"
 
 [[require]]
 name = "HexBasic"
