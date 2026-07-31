@@ -1,0 +1,349 @@
+/-
+Copyright (c) 2026 Lean FRO, LLC. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Kim Morrison
+-/
+
+module
+
+public import HexBasic
+public import HexHensel.Linear
+
+public section
+
+/-!
+Executable multifactor Hensel lifting surface.
+
+This module exposes the ordered product convention used by downstream
+factorization code and implements a sequential multifactor lift by repeatedly
+reducing the problem to the binary Hensel lift.
+-/
+
+namespace Array
+
+/-- Ordered product of integer polynomial factors, using left-fold order. -/
+@[expose]
+def polyProduct (factors : Array Hex.ZPoly) : Hex.ZPoly :=
+  factors.foldl (· * ·) 1
+
+end Array
+
+namespace Hex
+
+namespace ZPoly
+
+/--
+Extended gcd witnesses scaled so their Bezout combination is monic when the
+raw Euclidean gcd is a nonzero constant unit.
+-/
+@[expose]
+def normalizedXGCD
+    (p : Nat) [ZMod64.Bounds p]
+    (g h : ZPoly) : DensePoly.XGCDResult (ZMod64 p) :=
+  let raw := DensePoly.xgcd (modP p g) (modP p h)
+  let unitInv := (DensePoly.leadingCoeff raw.gcd)⁻¹
+  { gcd := DensePoly.scale unitInv raw.gcd
+    left := DensePoly.scale unitInv raw.left
+    right := DensePoly.scale unitInv raw.right }
+
+/-- The normalised xgcd witnesses still satisfy the Bezout identity, now for
+the normalised gcd component. -/
+theorem normalizedXGCD_bezout
+    (p : Nat) [ZMod64.Bounds p] [ZMod64.PrimeModulus p]
+    (g h : ZPoly) :
+    let xgcd := normalizedXGCD p g h
+    xgcd.left * modP p g + xgcd.right * modP p h = xgcd.gcd := by
+  unfold normalizedXGCD
+  let raw := DensePoly.xgcd (modP p g) (modP p h)
+  let unitInv := (DensePoly.leadingCoeff raw.gcd)⁻¹
+  have hraw : raw.left * modP p g + raw.right * modP p h = raw.gcd := by
+    simpa [raw] using DensePoly.xgcd_bezout (modP p g) (modP p h)
+  change
+    DensePoly.scale unitInv raw.left * modP p g +
+        DensePoly.scale unitInv raw.right * modP p h =
+      DensePoly.scale unitInv raw.gcd
+  rw [← FpPoly.scale_mul_left, ← FpPoly.scale_mul_left,
+    ← FpPoly.scale_add, hraw]
+
+/-- If the normalised xgcd component is `1`, its lifted witnesses give the
+integer-polynomial Bezout congruence needed to initialise a Hensel split. -/
+theorem normalizedXGCD_liftToZ_bezout_congr_of_gcd_eq_one
+    (p : Nat) [ZMod64.Bounds p] [ZMod64.PrimeModulus p]
+    (g h : ZPoly)
+    (hgcd :
+      let xgcd := normalizedXGCD p g h
+      xgcd.gcd = (1 : FpPoly p)) :
+    let xgcd := normalizedXGCD p g h
+    congr
+      (FpPoly.liftToZ xgcd.left * g + FpPoly.liftToZ xgcd.right * h)
+      1 p := by
+  let xgcd := normalizedXGCD p g h
+  have hmod :
+      modP p (FpPoly.liftToZ xgcd.left * g + FpPoly.liftToZ xgcd.right * h) =
+        (1 : FpPoly p) := by
+    rw [modP_add, modP_lift_mul_left, modP_lift_mul_left]
+    calc
+      xgcd.left * modP p g + xgcd.right * modP p h = xgcd.gcd := by
+        simpa [xgcd] using normalizedXGCD_bezout p g h
+      _ = 1 := by
+        simpa [xgcd] using hgcd
+  have hlift_expr :
+      congr (FpPoly.liftToZ (1 : FpPoly p))
+        (FpPoly.liftToZ xgcd.left * g + FpPoly.liftToZ xgcd.right * h) p :=
+    congr_liftToZ_of_modP_eq p (1 : FpPoly p)
+      (FpPoly.liftToZ xgcd.left * g + FpPoly.liftToZ xgcd.right * h) hmod
+  have hlift_one :
+      congr (FpPoly.liftToZ (1 : FpPoly p)) (1 : ZPoly) p :=
+    congr_liftToZ_of_modP_eq p (1 : FpPoly p) (1 : ZPoly) (modP_one p)
+  exact congr_trans _ _ _ p (congr_symm _ _ _ hlift_expr) hlift_one
+
+/-- Recursive list-shape worker behind `multifactorLift`. At each
+non-singleton step it lifts the head factor `g` against the running
+complementary product `Array.polyProduct rest.toArray` via `henselLift`, and
+recurses with `lifted.h` as the new target on `rest`. The singleton case
+returns the input reduced modulo `p^k`; the empty case returns the empty
+array. -/
+@[expose]
+def multifactorLiftList
+    (p k : Nat) [ZMod64.Bounds p]
+    (f : ZPoly) : List ZPoly → Array ZPoly
+  | [] => #[]
+  | [_g] => #[reduceModPow f p k]
+  | g :: rest =>
+      let restFactors := rest.toArray
+      let h := Array.polyProduct restFactors
+      let xgcd := normalizedXGCD p g h
+      let lifted := henselLift p k f g h xgcd.left xgcd.right
+      #[lifted.g] ++ multifactorLiftList p k lifted.h rest
+
+/--
+Lift an ordered array of factors from congruence modulo `p` to congruence
+modulo `p^k`.
+-/
+@[expose]
+def multifactorLift
+    (p k : Nat) [ZMod64.Bounds p]
+    (f : ZPoly) (factors : Array ZPoly) : Array ZPoly :=
+  multifactorLiftList p k f factors.toList
+
+/--
+Recursive preconditions required by the sequential multifactor lift.
+
+In the `g :: h :: tail` arm, the four conjuncts are exactly the inputs
+`henselLift_spec` consumes for the binary split of `g` against the running
+complementary product `Array.polyProduct (h :: tail).toArray`, followed by the
+recursive precondition for the lifted complement:
+
+1. `LinearLiftLoopInvariant` at `n = 1`; initial state for the linear loop;
+2. the step-degree invariant at every iteration `n ≥ 1`;
+3. the step-Bezout congruence at every iteration `n ≥ 1`;
+4. `MultifactorLiftInvariant` for the recursive tail with `lifted.h` as the
+   new target.
+
+The base cases impose the trivial obligations: `congr 1 f (p ^ k)` for the
+empty list and no preconditions for a singleton.
+
+This invariant is **proof-internal**: it is the correctness substrate consumed
+by `multifactorLift_spec` and by the Mathlib-side lift-uniqueness statement
+`HexHenselMathlib.multifactorLift_eq_multifactorLiftQuadratic`, and is not
+intended to be constructed directly by external callers. Unlike the quadratic
+path, no `multifactorLiftInvariant_of_factorsModP` smart constructor is
+provided: the four-conjunct shape mentions per-iteration `LinearLiftLoopInvariant`
+and `LinearLiftStepDegreeInvariant` quantifications that would require
+substrate lemmas (an `of_product_bezout_monic` constructor for
+`LinearLiftLoopInvariant`, plus `henselLift_h_congr_mod_base` and
+`henselLift_h_monic` analogues of the quadratic recursive correspondence) that
+`HexHensel/Linear.lean` does not currently expose.
+
+Callers wanting a consumer-facing Hensel-lift correctness surface should use
+the quadratic flavour `QuadraticMultifactorLiftInvariant`, constructed from
+natural mod-`p` factorisation facts by
+`quadraticMultifactorLiftInvariant_of_factorsModP` (with the
+`QuadraticMultifactorLiftInvariant_of_choosePrimeData` wrapper at the
+Berlekamp-Zassenhaus boundary). The executable Berlekamp-Zassenhaus computation
+already uses the quadratic invariant exclusively
+(`HexBerlekampZassenhaus/Basic.lean`). A Mathlib-side downstream caller that
+needs the linear-path lifted factors modulo `p^k` should obtain them via
+`HexHenselMathlib.multifactorLift_eq_multifactorLiftQuadratic`, which equates
+the two paths under the Mathlib `Polynomial.map (Int.castRingHom (ZMod (p^k)))`
+canonicalisation.
+-/
+@[expose]
+def MultifactorLiftInvariant
+    (p k : Nat) [ZMod64.Bounds p]
+    (f : ZPoly) : List ZPoly → Prop
+  | [] => ZPoly.congr 1 f (p ^ k)
+  | [_g] => True
+  | g :: rest =>
+      let h := Array.polyProduct rest.toArray
+      let xgcd := normalizedXGCD p g h
+      let lifted := henselLift p k f g h xgcd.left xgcd.right
+      LinearLiftLoopInvariant p 1 f xgcd.left xgcd.right
+        { g := reduceModPow g p 1
+          h := reduceModPow h p 1 } ∧
+        (∀ (n : Nat) (state : LinearLiftResult),
+          1 ≤ n →
+          LinearLiftLoopInvariant p n f xgcd.left xgcd.right state →
+          LinearLiftStepDegreeInvariant p n f xgcd.left xgcd.right state) ∧
+        (∀ (n : Nat) (state : LinearLiftResult),
+          1 ≤ n →
+          LinearLiftLoopInvariant p n f xgcd.left xgcd.right state →
+          let next := linearHenselStep p n f state.g state.h xgcd.left xgcd.right
+          ZPoly.congr
+            (FpPoly.liftToZ
+              (xgcd.left * ZPoly.modP p next.g + xgcd.right * ZPoly.modP p next.h))
+            1 p) ∧
+        MultifactorLiftInvariant p k lifted.h rest
+
+/-- Left identity for `ZPoly` multiplication, used to reason about
+`Array.polyProduct` as a left fold from `1`. Shared by the linear and
+quadratic multifactor proofs. -/
+@[simp, grind =]
+theorem one_mul_zpoly (g : ZPoly) :
+    (1 : ZPoly) * g = g := by
+  rw [DensePoly.mul_comm_poly (S := Int), DensePoly.mul_one_right_poly]
+
+/-- `Array.polyProduct` of a singleton array is just the element. -/
+@[simp, grind =]
+theorem polyProduct_singleton (g : ZPoly) :
+    Array.polyProduct #[g] = g := by
+  simp [Array.polyProduct]
+
+/-- Associativity helper for product invariants: folding `(· * ·)` over a
+`List ZPoly` with seed `g` factors out as `g` times the same fold with seed
+`1`. This is not a simp normal form because both sides contain the same
+left fold. -/
+theorem list_foldl_mul_eq_mul_foldl_one (g : ZPoly) (xs : List ZPoly) :
+    xs.foldl (fun acc factor => acc * factor) g =
+      g * xs.foldl (fun acc factor => acc * factor) 1 :=
+  List.foldl_mul_eq_mul_foldl xs id g
+
+/-- Splitting `Array.polyProduct` across a singleton prepend: the head
+factors out as a left multiplication. Used to relate the multifactor
+recursion tree to the public ordered-product convention. Left untagged as
+`@[simp]` because downstream Mathlib-side proofs use large recursive product terms
+where this rewrite is better applied explicitly. -/
+theorem polyProduct_singleton_append (g : ZPoly) (rest : Array ZPoly) :
+    Array.polyProduct (#[g] ++ rest) = g * Array.polyProduct rest := by
+  cases rest with
+  | mk xs =>
+      simpa [Array.polyProduct, one_mul_zpoly] using
+        list_foldl_mul_eq_mul_foldl_one g xs
+
+/-- `Array.polyProduct` of the empty array is the multiplicative unit. -/
+@[simp, grind =]
+theorem polyProduct_empty :
+    Array.polyProduct (#[] : Array ZPoly) = 1 :=
+  rfl
+
+/-- `Array.polyProduct` splits as a product across array concatenation. -/
+@[simp, grind =]
+theorem polyProduct_append (xs ys : Array ZPoly) :
+    Array.polyProduct (xs ++ ys) =
+      Array.polyProduct xs * Array.polyProduct ys := by
+  rw [Array.polyProduct, Array.foldl_append]
+  cases ys with
+  | mk ylist =>
+      simpa [Array.polyProduct] using list_foldl_mul_eq_mul_foldl_one
+        (Array.foldl (fun acc factor => acc * factor) 1 xs) ylist
+
+/-- `Array.polyProduct` over `(g :: rest).toArray` factors the head out as a
+left multiplication. The `List`-flavoured analogue of
+`polyProduct_singleton_append`. Left untagged as `@[simp]` for the same
+downstream performance reason: callers use it explicitly at product-splitting
+points. -/
+theorem polyProduct_cons_toArray (g : ZPoly) (rest : List ZPoly) :
+    Array.polyProduct (g :: rest).toArray =
+      g * Array.polyProduct rest.toArray := by
+  simpa [Array.polyProduct, one_mul_zpoly] using
+    (list_foldl_mul_eq_mul_foldl_one g rest)
+
+/-- `Array.polyProduct` of a two-element array is the product of the two
+entries. -/
+@[simp, grind =]
+theorem polyProduct_pair (g h : ZPoly) :
+    Array.polyProduct #[g, h] = g * h := by
+  simp [Array.polyProduct]
+
+/-- `Array.polyProduct` over a zero-length replicated list is the
+multiplicative unit. -/
+@[simp, grind =]
+theorem polyProduct_replicate_zero_toArray (g : ZPoly) :
+    Array.polyProduct (List.replicate 0 g).toArray = 1 := by
+  rfl
+
+/-- Induction-on-`factors` correctness statement feeding
+`multifactorLift_spec`: the ordered product of the lifted factors is
+congruent to `f` modulo `p^k`, provided each recursive binary split supplies
+the linear Hensel invariant package threaded by `MultifactorLiftInvariant`. -/
+private theorem multifactorLiftList_spec
+    (p k : Nat) [ZMod64.Bounds p] [ZMod64.PrimeModulus p]
+    (f : ZPoly) (factors : List ZPoly)
+    (hk : 1 ≤ k)
+    (hp : 1 < p)
+    (hinv : MultifactorLiftInvariant p k f factors) :
+    ZPoly.congr (Array.polyProduct (multifactorLiftList p k f factors)) f (p ^ k) := by
+  induction factors generalizing f with
+  | nil =>
+      simpa [multifactorLiftList, Array.polyProduct, MultifactorLiftInvariant] using hinv
+  | cons g rest ih =>
+      cases rest with
+      | nil =>
+          have hpow : 0 < p ^ k := Nat.pow_pos (Nat.zero_lt_of_lt hp)
+          simpa [multifactorLiftList, polyProduct_singleton,
+            DensePoly.mul_one_right_poly] using
+            ZPoly.congr_reduceModPow f p k hpow
+      | cons h tail =>
+          let restFactors := (h :: tail).toArray
+          let splitProduct := Array.polyProduct restFactors
+          let xgcd := normalizedXGCD p g splitProduct
+          let lifted := henselLift p k f g splitProduct xgcd.left xgcd.right
+          rcases hinv with ⟨hstart, hstepDegree, hstepBezout, htail⟩
+          have htailCongr :
+              ZPoly.congr
+                (Array.polyProduct (multifactorLiftList p k lifted.h (h :: tail)))
+                lifted.h
+                (p ^ k) := by
+            exact ih lifted.h htail
+          have hsplit :
+              ZPoly.congr (lifted.g * lifted.h) f (p ^ k) := by
+            simpa [lifted, splitProduct, restFactors, xgcd] using
+              henselLift_spec p k f g splitProduct xgcd.left xgcd.right
+                hk hp hstart hstepDegree hstepBezout
+          have hprod :
+              ZPoly.congr
+                (lifted.g *
+                  Array.polyProduct (multifactorLiftList p k lifted.h (h :: tail)))
+                (lifted.g * lifted.h)
+                (p ^ k) := by
+            exact ZPoly.congr_mul _ _ _ _ (p ^ k)
+              (ZPoly.congr_refl lifted.g (p ^ k))
+              htailCongr
+          have hcombined :
+              ZPoly.congr
+                (lifted.g *
+                  Array.polyProduct (multifactorLiftList p k lifted.h (h :: tail)))
+                f
+                (p ^ k) :=
+            ZPoly.congr_trans _ _ _ (p ^ k) hprod hsplit
+          simpa [multifactorLiftList, restFactors, splitProduct, xgcd, lifted,
+            polyProduct_singleton_append, polyProduct_singleton,
+            DensePoly.mul_one_right_poly] using hcombined
+
+/--
+The product of the lifted factors is congruent to `f` modulo `p^k`, provided
+each recursive binary split supplies the linear Hensel invariant package.
+-/
+theorem multifactorLift_spec
+    (p k : Nat) [ZMod64.Bounds p] [ZMod64.PrimeModulus p]
+    (f : ZPoly) (factors : Array ZPoly)
+    (hk : 1 ≤ k)
+    (hp : 1 < p)
+    (hinv : MultifactorLiftInvariant p k f factors.toList) :
+    ZPoly.congr (Array.polyProduct (multifactorLift p k f factors)) f (p ^ k) := by
+  simpa [multifactorLift] using
+    multifactorLiftList_spec p k f factors.toList hk hp hinv
+
+end ZPoly
+
+end Hex
