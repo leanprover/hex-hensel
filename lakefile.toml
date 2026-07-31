@@ -1,0 +1,25 @@
+name = "hex-hensel"
+defaultTargets = ["HexHensel"]
+
+leanOptions = [
+  { name = "doc.verso", value = true },
+  { name = "doc.verso.suggestions", value = false },
+]
+
+[[require]]
+name = "HexPolyFp"
+git = "https://github.com/leanprover/hex-poly-fp.git"
+rev = "963efabfbd17064105e4fd593d5a9136ae23af61"
+
+[[require]]
+name = "HexPolyZ"
+git = "https://github.com/leanprover/hex-poly-z.git"
+rev = "9ae13de5ecabbcb2e418505e6463187ee89e5d46"
+
+[[require]]
+name = "HexBasic"
+git = "https://github.com/leanprover/hex-basic.git"
+rev = "5354a7153ade8a60effaf6431bda7af22cc3410f"
+
+[[lean_lib]]
+name = "HexHensel"
