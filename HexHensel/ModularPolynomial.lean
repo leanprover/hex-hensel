@@ -44,6 +44,161 @@ to `FpPoly` or back into `ZPoly`.
 def intModNat (z : Int) (m : Nat) : Nat :=
   Int.toNat (z % Int.ofNat m)
 
+/--
+Windowed implementation of `intModNat`.
+
+Modular addition of canonical operands lands in `[0, 2m)` and modular
+subtraction in `(-m, m)`, so on the modular hot path almost every coefficient
+is within one modulus of its canonical representative. Testing for that costs a
+bignum comparison and at most one bignum addition, where `Int.emod` costs a
+full division; a value already in `[0, m)` is returned without allocating at
+all. Only genuinely wide values -- products, and the descent from a doubled
+precision -- pay for the division.
+
+Proved equal to `intModNat` in `intModNat_eq_impl`.
+-/
+def intModNatImpl (z : Int) (m : Nat) : Nat :=
+  if 0 ≤ z then
+    if z < Int.ofNat m then z.toNat else Int.toNat (z % Int.ofNat m)
+  else
+    let shifted := z + Int.ofNat m
+    if 0 ≤ shifted then shifted.toNat else Int.toNat (z % Int.ofNat m)
+
+theorem intModNat_eq_impl_value (z : Int) (m : Nat) :
+    intModNat z m = intModNatImpl z m := by
+  unfold intModNat intModNatImpl
+  by_cases hz : 0 ≤ z
+  · rw [if_pos hz]
+    by_cases hlt : z < Int.ofNat m
+    · rw [if_pos hlt, Int.emod_eq_of_lt hz hlt]
+    · rw [if_neg hlt]
+  · rw [if_neg hz]
+    dsimp only
+    by_cases hshift : 0 ≤ z + Int.ofNat m
+    · rw [if_pos hshift]
+      have hlt : z + Int.ofNat m < Int.ofNat m := by omega
+      have hshift_emod : (z + Int.ofNat m) % Int.ofNat m = z % Int.ofNat m := by
+        simp
+      rw [← hshift_emod, Int.emod_eq_of_lt hshift hlt]
+    · rw [if_neg hshift]
+
+/-- Proof-backed compiled implementation of the canonical representative. -/
+@[csimp] theorem intModNat_eq_impl : @intModNat = @intModNatImpl := by
+  funext z m
+  exact intModNat_eq_impl_value z m
+
+/--
+Canonical nonnegative representative of `z` modulo `m`, as an `Int`.
+
+The `Int`-valued sibling of {name}`intModNat`, for the coefficient arrays that
+are `Int`-valued on both sides of a reduction.
+-/
+@[expose]
+def intEmod (z : Int) (m : Nat) : Int :=
+  Int.ofNat (intModNat z m)
+
+/--
+Windowed implementation of `intEmod`.
+
+Routing through `intModNat` would cost a multi-limb copy on every coefficient,
+in both directions: `Int.toNat` copies a big nonnegative `Int` into a `Nat`,
+and the value is then immediately coerced back. Since `Int.emod` is already
+nonnegative at a nonzero modulus, that round trip is pure allocation, and
+allocation -- not division width -- is what the modular hot path is made of.
+
+The two near-canonical windows are kept: modular addition of canonical operands
+lands in `[0, 2m)` and modular subtraction in `(-m, m)`, so a coefficient
+already canonical is returned as itself, allocating nothing at all, and one
+within a modulus below costs a single addition. A genuinely wide value -- the
+long division's window, or the descent from a doubled precision -- pays for one
+`Int.emod` and nothing else.
+
+Proved equal to `intEmod` in `intEmod_eq_impl`.
+-/
+def intEmodImpl (z : Int) (m : Nat) : Int :=
+  if m = 0 then
+    Int.ofNat (Int.toNat z)
+  else if 0 ≤ z then
+    if z < Int.ofNat m then z else z % Int.ofNat m
+  else
+    let shifted := z + Int.ofNat m
+    if 0 ≤ shifted then shifted else z % Int.ofNat m
+
+theorem intEmod_eq_impl_value (z : Int) (m : Nat) :
+    intEmod z m = intEmodImpl z m := by
+  unfold intEmod intEmodImpl intModNat
+  by_cases hm : m = 0
+  · rw [if_pos hm, hm]
+    simp
+  · rw [if_neg hm]
+    have hmpos : 0 < m := Nat.pos_of_ne_zero hm
+    have hnonneg : 0 ≤ z % Int.ofNat m :=
+      Int.emod_nonneg _ (Int.ofNat_ne_zero.mpr hm)
+    have hround : Int.ofNat (Int.toNat (z % Int.ofNat m)) = z % Int.ofNat m := by
+      rw [Int.ofNat_eq_natCast, Int.toNat_of_nonneg hnonneg]
+    by_cases hz : 0 ≤ z
+    · rw [if_pos hz]
+      by_cases hlt : z < Int.ofNat m
+      · rw [if_pos hlt, Int.emod_eq_of_lt hz hlt, Int.ofNat_eq_natCast,
+          Int.toNat_of_nonneg hz]
+      · rw [if_neg hlt]
+        exact hround
+    · rw [if_neg hz]
+      dsimp only
+      by_cases hshift : 0 ≤ z + Int.ofNat m
+      · rw [if_pos hshift]
+        have hlt : z + Int.ofNat m < Int.ofNat m := by omega
+        have hshift_emod : (z + Int.ofNat m) % Int.ofNat m = z % Int.ofNat m := by
+          simp
+        rw [← hshift_emod, Int.emod_eq_of_lt hshift hlt, Int.ofNat_eq_natCast,
+          Int.toNat_of_nonneg hshift]
+      · rw [if_neg hshift]
+        exact hround
+
+/-- Proof-backed compiled implementation of the `Int`-valued canonical
+representative. -/
+@[csimp] theorem intEmod_eq_impl : @intEmod = @intEmodImpl := by
+  funext z m
+  exact intEmod_eq_impl_value z m
+
+/-- At a positive modulus `intEmod` is the ordinary integer remainder. -/
+theorem intEmod_eq_emod (z : Int) {m : Nat} (hm : 0 < m) :
+    intEmod z m = z % (m : Int) := by
+  unfold intEmod intModNat
+  rw [Int.ofNat_eq_natCast, Int.ofNat_eq_natCast]
+  exact Int.toNat_of_nonneg
+    (Int.emod_nonneg _ (Int.ofNat_ne_zero.mpr (Nat.ne_of_gt hm)))
+
+/-- `intEmod` lands in the canonical window. -/
+theorem intEmod_mem (z : Int) {m : Nat} (hm : 0 < m) :
+    0 ≤ intEmod z m ∧ intEmod z m < (m : Int) := by
+  have hpos : (0 : Int) < (m : Int) := by exact_mod_cast hm
+  rw [intEmod_eq_emod z hm]
+  exact ⟨Int.emod_nonneg _ (Int.ne_of_gt hpos), Int.emod_lt_of_pos _ hpos⟩
+
+/-- A value already in the canonical window is returned unchanged. -/
+theorem intEmod_eq_self {z : Int} {m : Nat} (h0 : 0 ≤ z) (h1 : z < (m : Int)) :
+    intEmod z m = z := by
+  have hm : 0 < m := by exact_mod_cast Int.lt_of_le_of_lt h0 h1
+  rw [intEmod_eq_emod z hm]
+  exact Int.emod_eq_of_lt h0 h1
+
+/-- Congruent integers have the same canonical representative. -/
+theorem intEmod_congr {a b : Int} {m : Nat} (h : a % (m : Int) = b % (m : Int)) :
+    intEmod a m = intEmod b m := by
+  unfold intEmod intModNat
+  simp only [Int.ofNat_eq_natCast]
+  rw [h]
+
+/-- Reducing one summand first does not change the canonical representative of a
+difference: the windowed elimination may subtract the raw product where the
+specification subtracts its reduction. -/
+theorem intEmod_sub_intEmod (a b : Int) {m : Nat} (hm : 0 < m) :
+    intEmod (a - intEmod b m) m = intEmod (a - b) m := by
+  refine intEmod_congr ?_
+  rw [intEmod_eq_emod b hm, Int.sub_emod a (b % (m : Int)), Int.sub_emod a b,
+    Int.emod_emod_of_dvd _ (Int.dvd_refl _)]
+
 /-- `intModNat` is the canonical nonnegative representative: re-coercing to `Int`
 recovers the ordinary integer remainder. Used to connect the `Nat`-valued executable
 reduction with `Int`-level congruence reasoning. -/
@@ -111,12 +266,12 @@ def reduceModPow (f : ZPoly) (p k : Nat) : ZPoly :=
 def reduceModPowImpl (f : ZPoly) (p k : Nat) : ZPoly :=
   let modulus := p ^ k
   DensePoly.ofCoeffs <|
-    f.toArray.map (fun coeff => Int.ofNat (intModNat coeff modulus))
+    f.toArray.map (fun coeff => intEmod coeff modulus)
 
 /-- The direct array map computes the reference prime-power reduction. -/
 theorem reduceModPow_eq_impl_value (f : ZPoly) (p k : Nat) :
     reduceModPow f p k = reduceModPowImpl f p k := by
-  unfold reduceModPow reduceModPowImpl DensePoly.ofList
+  unfold reduceModPow reduceModPowImpl intEmod DensePoly.ofList
   congr 1
   rw [show
       (List.range f.size).map
@@ -275,6 +430,41 @@ theorem reduceModPow_idempotent (f : ZPoly) (p k : Nat) (hpk : 0 < p ^ k) :
     (p k : Nat) [ZMod64.Bounds p] (f : ZPoly) :
     reduceModPow (reduceModPow f p k) p k = reduceModPow f p k :=
   reduceModPow_idempotent f p k (Nat.pow_pos (ZMod64.Bounds.pPos (p := p)))
+
+/--
+The coefficient-range invariant of the modular kernels: every coefficient of
+`f` is the canonical residue in `[0, m)`.
+
+This is the invariant a lift must carry in order to drop a canonicalisation:
+`reduceModPow_eq_self_of_canonical` says it is exactly the hypothesis under
+which `reduceModPow` is the identity.
+-/
+@[expose]
+def Canonical (f : ZPoly) (m : Nat) : Prop :=
+  ∀ i, 0 ≤ f.coeff i ∧ f.coeff i < (m : Int)
+
+/-- Canonical reduction at a positive modulus produces canonical coefficients. -/
+theorem canonical_reduceModPow (f : ZPoly) (p k : Nat) (hpk : 0 < p ^ k) :
+    Canonical (reduceModPow f p k) (p ^ k) := by
+  intro i
+  have hpos : (0 : Int) < ((p ^ k : Nat) : Int) := by exact_mod_cast hpk
+  rw [coeff_reduceModPow_eq_emod_of_pos f p k i hpk, Int.ofNat_eq_natCast]
+  exact ⟨Int.emod_nonneg _ (Int.ne_of_gt hpos), Int.emod_lt_of_pos _ hpos⟩
+
+/--
+Canonical coefficients are fixed by `reduceModPow`.
+
+This is the theorem that licenses deleting a redundant canonicalisation: a
+reduction applied to data already reduced to `[0, p ^ k)` returns its input
+unchanged, so removing it cannot change any result.
+-/
+theorem reduceModPow_eq_self_of_canonical (f : ZPoly) (p k : Nat)
+    (hpk : 0 < p ^ k) (hf : Canonical f (p ^ k)) :
+    reduceModPow f p k = f := by
+  apply DensePoly.ext_coeff
+  intro i
+  rw [coeff_reduceModPow_eq_emod_of_pos f p k i hpk, Int.ofNat_eq_natCast]
+  exact Int.emod_eq_of_lt (hf i).1 (hf i).2
 
 /-- Congruent integer polynomials have the same reduction modulo `p`. -/
 theorem modP_eq_of_congr (p : Nat) [ZMod64.Bounds p] (f g : ZPoly)
